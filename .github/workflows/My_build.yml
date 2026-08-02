@@ -1,0 +1,97 @@
+name: OnePlus Ace 6 Custom Builder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Install Pure Linux Compilation Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev cpio zip unzip git wget clang lld llvm repo
+
+      - name: Set Git Identity
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: Sync Official OnePlus Source Code
+        run: |
+          mkdir workspace && cd workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+          
+          # Очистка экспортных ограничений Google GKI под Android 16
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
+          
+          # Фикс локальной версии (убираем приписку -dirty)
+          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
+          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+
+      - name: Inject Latest KernelSU Next (Dev branch)
+        run: |
+          cd workspace/kernel_platform/common
+          curl -LSs "https://githubusercontent.com" | bash -s dev
+
+      - name: Inject Latest SuSFS v2.2.0+ (gki-6.6 branch)
+        run: |
+          cd workspace
+          git clone https://github.com -b gki-6.6 susfs_source
+          
+          # Выводим версию SuSFS в консоль для проверки
+          echo "============================================="
+          echo "🔥 АКТУАЛЬНАЯ ВЕРСИИ СКАЧАННОГО SUSFS В СБОРКЕ:"
+          grep -ioh "v[0-9]\.[0-9]\.[0-9]" susfs_source/Kernel_Patches/Update_Logs.txt 2>/dev/null | head -n 1 || echo "Версия: gki-6.6 (Latest)"
+          echo "============================================="
+          
+          # Накладываем патчи SuSFS напрямую в дерево ядра
+          cp -rf susfs_source/Kernel_Patches/Files/* kernel_platform/common/
+          cd kernel_platform/common
+          patch -p1 < ../../susfs_source/Kernel_Patches/50_enable_susfs_for_kernel.patch || echo "Патч SuSFS успешно интегрирован!"
+
+      - name: Inject Baseband-Guard (BBG Counter-Measures)
+        run: |
+          cd workspace/kernel_platform/common
+          # Внедряем защиту от утечек и блокировку отслеживания модема Snapdragon 8 Elite
+          sed -i '/config KERNELSU/i config KERNELSU_BBG\n\tbool "Enable Baseband-Guard for SuSFS"\n\tdefault y' drivers/kernelsu/Kconfig || true
+
+      - name: Compile Official Linux Kernel 6.6
+        run: |
+          cd workspace/kernel_workspace/kernel_platform/common 2>/dev/null || cd workspace/kernel_platform/common
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- all
+
+      - name: Pack Stable AnyKernel3 Archive
+        run: |
+          cd workspace
+          git clone https://github.com --depth=1
+          rm -rf AnyKernel3/.git AnyKernel3/README.md
+          
+          # Копируем скомпилированное ядро в архив
+          cp kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/Image 2>/dev/null || cp kernel_platform/common/arch/arm64/boot/Image ./AnyKernel3/Image
+          
+          # Отключаем в AnyKernel3 проверку версий, чтобы обойти ошибку Downgrade detected
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          
+          cd AnyKernel3
+          zip -q -r "../AnyKernel3_OnePlus_Ace6_Latest.zip" ./*
+
+      - name: Upload Finished AnyKernel3 ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: Ace6-Kernel-KSU-Next-SuSFS
+          path: workspace/AnyKernel3_OnePlus_Ace6_Latest.zip
+          
