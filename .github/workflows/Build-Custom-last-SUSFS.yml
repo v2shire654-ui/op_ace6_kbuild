@@ -1,4 +1,4 @@
-name: build Custom Last SUSFS
+name: build Custom
 
 on:
     workflow_dispatch:
@@ -107,7 +107,7 @@ jobs:
 
       - name: Install repo tool
         run: |
-          curl https://googleapis.com > ~/repo
+          curl -sSL https://googleapis.com > ~/repo
           chmod a+x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
 
@@ -170,17 +170,17 @@ jobs:
             ARGS+=" --no-ver-edit"
           fi
 
-          # Принудительное скачивание самого последнего SuSFS 2.2.0+ из официального репозитория
+          # Принудительное скачивание патчей SuSFS v2.2.0+ в обход бинарника
           rm -rf kernel_workspace/susfs4ksu 2>/dev/null || true
           git clone https://github.com -b gki-6.6 kernel_workspace/susfs4ksu
 
-          # Вывод реальной версии SuSFS прямо в лог консоли GitHub Actions
+          # Вывод версии SuSFS крупно прямо в лог воркфлоу
           echo "============================================="
           echo "🔥 ПРОВЕРКА СКАЧАННОЙ ВЕРСИИ SUSFS:"
           grep -ioh "v[0-9]\.[0-9]\.[0-9]" kernel_workspace/susfs4ksu/Kernel_Patches/Update_Logs.txt 2>/dev/null | head -n 1 || echo "Версия: gki-6.6 (Latest)"
           echo "============================================="
 
-          # Затираем старые патчи 1.5.2 в папке скриптов новыми патчами 2.2.0+
+          # Замена старых патчей 1.5.2 на новые версии 2.2.0+
           cp -rf kernel_workspace/susfs4ksu/Kernel_Patches/* ./scripts/patches/ 2>/dev/null || true
 
           cd kernel_workspace
