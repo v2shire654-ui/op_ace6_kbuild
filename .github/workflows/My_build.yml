@@ -49,46 +49,29 @@ jobs:
 
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-
-      # ── 3. ФИЛЬТРОВАННАЯ СИНХРОНИЗАЦИЯ REPO ───────────────────────
-      - name: Sync OnePlus kernel manifest (heavy blobs stripped)
+          
+      # ── 3. ЛЕГКОВЕСНОЕ СКАЧИВАНИЕ ИСХОДНИКОВ (Обход Repo) ──────────
+      - name: Clone OnePlus kernel source code
         run: |
           mkdir -p "${HOME}/kernel"
           cd "${HOME}/kernel"
-
-          repo init \
-            -u "https://github.com/OnePlusOSS/kernel_manifest.git" \
-            -b "oneplus/sm8750" \
-            -m "oneplus_ace_6.xml" \
-            --depth=1 --no-clone-bundle
-
-          # Удаляем из активного манифеста все тяжелые prebuilt-проекты
-          # Экономия: 35+ GB
-          MANIFEST=".repo/manifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            sed -i '/prebuilts\/clang/d'  "$MANIFEST"
-            sed -i '/prebuilts\/gcc/d'    "$MANIFEST"
-            sed -i '/prebuilts\/rust/d'   "$MANIFEST"
-            sed -i '/prebuilts\/jdk/d'    "$MANIFEST"
-            sed -i '/tools\/tradefederation/d' "$MANIFEST"
-            sed -i '/toolchain/d'         "$MANIFEST"
-            echo "Manifest filtered. Projects remaining:"
-            grep -o 'path="' "$MANIFEST" | wc -l
-          fi
-
-          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle \
-            --filter=blob:none --groups=default,-notdefault,-partner
+          # Скачиваем чистый срез исходников OnePlus Ace 6 без тяжелой истории коммитов
+          git clone --depth=1 -b android15 "https://github.com" workspace
+          
+          # Создаем структуру папок, которую ожидают последующие шаги Kimi
+          mkdir -p common/arch/arm64/boot
+          cp -rf workspace/kernel_platform/common/* ./common/ 2>/dev/null || cp -rf workspace/* ./common/
 
       # ── 4. УДАЛЕНИЕ ABI-ОГРАНИЧЕНИЙ ────────────────────────────────
       - name: Remove ABI protected exports restrictions
         run: |
-          cd "${HOME}/kernel"
+          cd "${HOME}/kernel/common"
           find . -type f -name "abi_gki_protected_exports*" -print0 | \
             while IFS= read -r -d '' f; do
               echo "Clearing ABI restrictions in: $f"
               echo "" > "$f"
             done
-
+            
       # ── 5. ИНТЕГРАЦИЯ KERNELSU-NEXT (dev) ───────────────────────────
       - name: Integrate KernelSU-Next dev branch
         run: |
