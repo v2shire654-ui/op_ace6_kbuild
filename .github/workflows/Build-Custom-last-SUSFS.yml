@@ -1,4 +1,4 @@
-name: build Custom
+name: build Custom Last SUSFS
 
 on:
     workflow_dispatch:
