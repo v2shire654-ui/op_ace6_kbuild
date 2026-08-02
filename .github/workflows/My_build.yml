@@ -1,95 +1,218 @@
-name: OnePlus Ace 6 Custom Builder
+name: Build OnePlus Ace 6 Custom Kernel
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
     steps:
-      - name: Maximize Build Space
-        uses: easimon/maximize-build-space@master
+      # ── 1. Очистка диска ─────────────────────────────────────────────
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
+          root-reserve-mb: 2048
+          swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
-          remove-codeql: 'true'
 
-      - name: Install Pure Linux Compilation Tools
+      # ── 2. Установка зависимостей и repo ────────────────────────────
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev cpio zip unzip git wget clang lld llvm repo
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison flex libssl-dev libelf-dev git wget curl zip unzip \
+            repo build-essential python3 python3-pip gawk cpio openssl \
+            libncurses5-dev libncursesw5-dev zlib1g-dev libxml2-utils \
+            jq file rsync
 
-      - name: Set Git Identity
-        run: |
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          sudo curl -o /usr/local/bin/repo "https://storage.googleapis.com/git-repo-downloads/repo"
+          sudo chmod a+x /usr/local/bin/repo
 
-      - name: Sync Official OnePlus Source Code
-        run: |
-          mkdir workspace && cd workspace
-          repo init -u "https://github.com" -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
-          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
-          
-          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
-          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || true
-          
-          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
-          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
 
-      - name: Inject Latest KernelSU Next (Dev branch)
+      # ── 3. Синхронизация исходников ─────────────────────────────────
+      - name: Sync OnePlus kernel manifest
         run: |
-          cd workspace/kernel_platform/common
-          curl -LSs "https://githubusercontent.com" | bash -s dev
+          mkdir -p "${HOME}/kernel"
+          cd "${HOME}/kernel"
 
-      - name: Inject Latest SuSFS v2.2.0+ (gki-6.6 branch)
-        run: |
-          cd workspace
-          # Скачиваем стабильным zip-архивом ветку gki-6.6, чтобы полностью избежать проблем с git clone
-          wget https://github.com -O susfs.zip
-          unzip -q susfs.zip
-          mv susfs4ksu-gki-6.6 susfs_source
-          
-          echo "============================================="
-          echo "🔥 АКТУАЛЬНАЯ ВЕРСИЯ СКАЧАННОГО SUSFS В СБОРКЕ:"
-          grep -ioh "v[0-9]\.[0-9]\.[0-9]" susfs_source/Kernel_Patches/Update_Logs.txt 2>/dev/null | head -n 1 || echo "Version: gki-6.6 (Latest)"
-          echo "============================================="
-          
-          cp -rf susfs_source/Kernel_Patches/Files/* kernel_platform/common/
-          cd kernel_platform/common
-          patch -p1 < ../../susfs_source/Kernel_Patches/50_enable_susfs_for_kernel.patch || echo "SuSFS patched!"
+          repo init \
+            -u "https://github.com/OnePlusOSS/kernel_manifest.git" \
+            -b "oneplus/sm8750" \
+            -m "oneplus_ace_6.xml" \
+            --depth=1 --no-clone-bundle
 
-      - name: Inject Baseband-Guard (BBG Counter-Measures)
-        run: |
-          cd workspace/kernel_platform/common
-          sed -i '/config KERNELSU/i config KERNELSU_BBG\n\tbool "Enable Baseband-Guard for SuSFS"\n\tdefault y' drivers/kernelsu/Kconfig || true
+          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle
 
-      - name: Compile Official Linux Kernel 6.6
+      # ── 4. Удаление ограничений ABI ─────────────────────────────────
+      - name: Remove ABI protected exports restrictions
         run: |
-          cd workspace/kernel_workspace/kernel_platform/common 2>/dev/null || cd workspace/kernel_platform/common
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- all
+          cd "${HOME}/kernel"
+          find . -type f -name "abi_gki_protected_exports*" -print0 | while IFS= read -r -d '' f; do
+            echo "Clearing ABI restrictions in: $f"
+            echo "" > "$f"
+          done
 
-      - name: Pack Stable AnyKernel3 Archive
+      # ── 5. Интеграция KernelSU-Next (dev) ───────────────────────────
+      - name: Integrate KernelSU-Next dev branch
         run: |
-          cd workspace
-          # Скачиваем AnyKernel3 архивом без использования уязвимого git clone
-          wget https://github.com -O ak3.zip
-          unzip -q ak3.zip
-          mv AnyKernel3-master AnyKernel3
-          
-          cp kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/Image 2>/dev/null || cp kernel_platform/common/arch/arm64/boot/Image ./AnyKernel3/Image
-          
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-          
+          cd "${HOME}/kernel/common"
+
+          git clone --depth=1 -b dev "https://github.com/KernelSU-Next/KernelSU-Next.git" KernelSU-Next
+
+          # Регистрация в Kconfig драйверов
+          if grep -q 'source "drivers/Kconfig"' drivers/Kconfig; then
+            sed -i '/source "drivers\/Kconfig"/a source "KernelSU-Next/Kconfig"' drivers/Kconfig
+          else
+            echo 'source "KernelSU-Next/Kconfig"' >> drivers/Kconfig
+          fi
+
+          # Регистрация в корневом Makefile ядра
+          echo 'obj-$(CONFIG_KSU) += KernelSU-Next/' >> Makefile
+
+      # ── 6. Интеграция SuSFS (gki-6.6) ───────────────────────────────
+      - name: Download and apply SuSFS patches
+        run: |
+          cd "${HOME}/kernel"
+
+          SUSFS_ZIP="susfs4ksu-gki-6.6.zip"
+          wget -q --show-progress "https://gitlab.com/simonpunk/susfs4ksu/-/archive/gki-6.6/susfs4ksu-gki-6.6.zip" -O "${SUSFS_ZIP}"
+          unzip -q "${SUSFS_ZIP}"
+
+          SUSFS_DIR=$(find . -maxdepth 1 -type d -name "susfs4ksu-gki-6.6*" | head -n 1)
+
+          echo "========================================"
+          echo "SuSFS Version / Update Logs:"
+          if [ -f "${SUSFS_DIR}/Update_Logs.txt" ]; then
+            head -n 20 "${SUSFS_DIR}/Update_Logs.txt"
+          else
+            echo "Update_Logs.txt not found in archive"
+          fi
+          echo "========================================"
+
+          # Копирование заголовков и исходников
+          cp -f "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" common/include/linux/ 2>/dev/null || true
+          cp -f "${SUSFS_DIR}/kernel_patches/fs/susfs.c" common/fs/ 2>/dev/null || true
+
+          # Применение патча к ядру
+          cd "${HOME}/kernel/common"
+          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"50_add_susfs*.patch; do
+            if [ -f "$patch" ]; then
+              echo "Applying kernel patch: $patch"
+              patch -p1 < "$patch" || echo "Note: patch may have been applied partially or already exists"
+              break
+            fi
+          done
+
+          # Применение патча к KernelSU-Next
+          cd "${HOME}/kernel/common/KernelSU-Next"
+          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"10_enable_susfs*.patch; do
+            if [ -f "$patch" ]; then
+              echo "Applying KSU patch: $patch"
+              patch -p1 < "$patch" || echo "Note: KSU patch may have been applied partially or already exists"
+              break
+            fi
+          done
+
+      # ── 7. Интеграция Baseband-Guard (BBG) ──────────────────────────
+      - name: Integrate Baseband-Guard
+        run: |
+          cd "${HOME}/kernel/common"
+
+          # Официальный setup-скрипт (добавляет Kconfig, Makefile, исходники)
+          wget -qO- "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash || true
+
+          # Принудительная регистрация baseband_guard в цепочке LSM для автосборки
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig || true
+
+      # ── 8. Уборка флага -dirty ──────────────────────────────────────
+      - name: Clean kernel version suffix
+        run: |
+          cd "${HOME}/kernel/common"
+          # Фиксируем все модификации, чтобы setlocalversion не добавил -dirty
+          git add -A
+          git -c user.name="CI" -c user.email="ci@localhost" commit -m "ci: integrate KSU-Next, SuSFS and BBG" || true
+          echo "" > .scmversion
+
+      # ── 9. Конфигурация ядра ────────────────────────────────────────
+      - name: Configure defconfig
+        run: |
+          cd "${HOME}/kernel/common"
+
+          # KernelSU
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+
+          # SuSFS
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/gki_defconfig
+
+          # Baseband-Guard
+          echo "CONFIG_BBG=y" >> arch/arm64/configs/gki_defconfig
+
+      # ── 10. Компиляция ──────────────────────────────────────────────
+      - name: Build kernel with LLVM/Clang
+        run: |
+          cd "${HOME}/kernel"
+
+          # Поиск prebuilt Clang из манифеста Android/OnePlus
+          CLANG_DIR=$(find prebuilts/clang/host/linux-x86 -maxdepth 2 -type d -name "clang-*" | sort -V | tail -n 1)
+          if [ -n "$CLANG_DIR" ] && [ -d "$CLANG_DIR/bin" ]; then
+            echo "Using prebuilt Clang: $CLANG_DIR"
+            export PATH="${CLANG_DIR}/bin:${PATH}"
+          else
+            echo "Prebuilt Clang not found, using system LLVM"
+            sudo apt-get install -y -qq clang lld llvm
+          fi
+
+          cd "${HOME}/kernel/kernel_platform/common"
+
+          make ARCH=arm64 gki_defconfig
+
+          make -j$(nproc --all) ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+      # ── 11. Упаковка AnyKernel3 ─────────────────────────────────────
+      - name: Package AnyKernel3
+        run: |
+          cd "${HOME}/kernel"
+
+          git clone --depth=1 "https://github.com/osm0sis/AnyKernel3.git" AnyKernel3
+          cp common/arch/arm64/boot/Image AnyKernel3/
+
           cd AnyKernel3
-          zip -q -r "../AnyKernel3_OnePlus_Ace6_Latest.zip" ./*
 
-      - name: Upload Finished AnyKernel3 ZIP
-        uses: actions/upload-artifact@v7
+          # Отключаем жёсткие проверки устройства и версий
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+          sed -i 's/do.modules=1/do.modules=0/' anykernel.sh
+          sed -i 's/do.systemless=0/do.systemless=1/' anykernel.sh
+
+          # Убираем проверки supported.versions / supported.patchlevels
+          sed -i '/supported.versions=/c\# supported.versions=' anykernel.sh || true
+          sed -i '/supported.patchlevels=/c\# supported.patchlevels=' anykernel.sh || true
+
+          # Упаковка
+          zip -r9 "${HOME}/kernel/OnePlus-Ace6-CustomKernel.zip" * -x ".git*" "README.md" "LICENSE"
+
+      # ── 12. Выгрузка артефакта ──────────────────────────────────────
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: Ace6-Kernel-KSU-Next-SuSFS
-          path: workspace/AnyKernel3_OnePlus_Ace6_Latest.zip
-          
+          name: OnePlus-Ace6-CustomKernel
+          path: ~/kernel/OnePlus-Ace6-CustomKernel.zip
+          if-no-files-found: error
