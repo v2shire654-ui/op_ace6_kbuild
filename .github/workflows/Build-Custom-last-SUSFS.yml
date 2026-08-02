@@ -107,9 +107,7 @@ jobs:
 
       - name: Install repo tool
         run: |
-          curl -sSL https://googleapis.com > ~/repo
-          chmod a+x ~/repo
-          sudo mv ~/repo /usr/local/bin/repo
+          sudo apt-get update && sudo apt-get install -y repo
 
       - name: sync
         run: |
@@ -124,6 +122,9 @@ jobs:
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/common/scripts/setlocalversion
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/msm-kernel/scripts/setlocalversion
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/external/dtc/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/common/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/msm-kernel/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/external/dtc/scripts/setlocalversion
           sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/common/scripts/setlocalversion
           sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/msm-kernel/scripts/setlocalversion
           sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/external/dtc/scripts/setlocalversion
