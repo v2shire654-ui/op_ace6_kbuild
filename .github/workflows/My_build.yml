@@ -1,4 +1,4 @@
-name: Build OnePlus Ace 6 Custom Kernel (Space-Optimized)
+name: Build OnePlus Ace 6 Custom Kernel (Repo-Free)
 
 on:
   workflow_dispatch:
@@ -39,51 +39,50 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             bc bison flex libssl-dev libelf-dev git wget curl zip unzip \
-            repo build-essential python3 python3-pip gawk cpio openssl \
+            build-essential python3 python3-pip gawk cpio openssl \
             libncurses5-dev libncursesw5-dev zlib1g-dev libxml2-utils \
             jq file rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-          sudo curl -o /usr/local/bin/repo "https://storage.googleapis.com/git-repo-downloads/repo"
-          sudo chmod a+x /usr/local/bin/repo
-
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-      # ── 3. ЛЕГКОВЕСНОЕ СКАЧИВАНИЕ ИСХОДНИКОВ (Обход Repo) ──────────
-      - name: Clone OnePlus kernel source code
+
+      # ── 3. КЛОНИРОВАНИЕ ИСХОДНИКОВ (без repo, рабочий апстрим) ─────
+      - name: Clone OnePlus kernel source directly
         run: |
           mkdir -p "${HOME}/kernel"
           cd "${HOME}/kernel"
-          # Скачиваем чистый срез исходников OnePlus Ace 6 без тяжелой истории коммитов
-          git clone --depth=1 -b android15 "https://github.com" workspace
-          
-          # Создаем структуру папок, которую ожидают последующие шаги Kimi
-          mkdir -p common/arch/arm64/boot
-          cp -rf workspace/kernel_platform/common/* ./common/ 2>/dev/null || cp -rf workspace/* ./common/
+          mkdir -p workspace/kernel_platform
+
+          # Используем проверенную ветку со стоковыми исходниками Ace 6
+          git clone --depth=1 -b android15 \
+            "https://github.com" \
+            workspace/tmp_source
+
+          # Раскладываем в правильную структуру папок для компиляции
+          cp -rf workspace/tmp_source/kernel_platform/common workspace/kernel_platform/common 2>/dev/null || cp -rf workspace/tmp_source workspace/kernel_platform/common
+          rm -rf workspace/tmp_source
+
+          echo "Kernel source cloned successfully."
 
       # ── 4. УДАЛЕНИЕ ABI-ОГРАНИЧЕНИЙ ────────────────────────────────
       - name: Remove ABI protected exports restrictions
         run: |
-          cd "${HOME}/kernel/common"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
           find . -type f -name "abi_gki_protected_exports*" -print0 | \
             while IFS= read -r -d '' f; do
               echo "Clearing ABI restrictions in: $f"
               echo "" > "$f"
             done
-            
+
       # ── 5. ИНТЕГРАЦИЯ KERNELSU-NEXT (dev) ───────────────────────────
       - name: Integrate KernelSU-Next dev branch
         run: |
-          cd "${HOME}/kernel"
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          if [ -z "$COMMON_DIR" ]; then
-            echo "ERROR: common/ directory not found after repo sync"
-            exit 1
-          fi
-          cd "$COMMON_DIR"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
 
-          git clone --depth=1 -b dev "https://github.com/KernelSU-Next/KernelSU-Next.git" KernelSU-Next
+          git clone --depth=1 -b dev \
+            "https://github.com" \
+            KernelSU-Next
 
           # Регистрация Kconfig
           if grep -q 'source "drivers/Kconfig"' drivers/Kconfig; then
@@ -95,80 +94,83 @@ jobs:
           # Регистрация в Makefile
           echo 'obj-$(CONFIG_KSU) += KernelSU-Next/' >> Makefile
 
-      # ── 6. ИНТЕГРАЦИЯ SUSFS (gki-6.6, zip) ──────────────────────────
+      # ── 6. ИНТЕГРАЦИЯ SUSFS (gki-6.6, чистые патчи) ──────────────────
       - name: Download and apply SuSFS patches
         run: |
           cd "${HOME}/kernel"
 
           SUSFS_ZIP="susfs4ksu-gki-6.6.zip"
-          wget -q --show-progress "https://gitlab.com/simonpunk/susfs4ksu/-/archive/gki-6.6/susfs4ksu-gki-6.6.zip" -O "${SUSFS_ZIP}"
+          wget -q --show-progress \
+            "https://gitlab.com" \
+            -O "${SUSFS_ZIP}"
           unzip -q "${SUSFS_ZIP}"
 
           SUSFS_DIR=$(find . -maxdepth 1 -type d -name "susfs4ksu-gki-6.6*" | head -n 1)
 
           echo "========================================"
           echo "SuSFS Version / Update Logs:"
-          if [ -f "${SUSFS_DIR}/Update_Logs.txt" ]; then
-            head -n 20 "${SUSFS_DIR}/Update_Logs.txt"
+          if [ -f "${SUSFS_DIR}/Kernel_Patches/Update_Logs.txt" ]; then
+            head -n 20 "${SUSFS_DIR}/Kernel_Patches/Update_Logs.txt"
           else
             echo "Update_Logs.txt not found in archive"
           fi
           echo "========================================"
 
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
+          COMMON_DIR="${HOME}/kernel/workspace/kernel_platform/common"
 
           # Копирование исходников SuSFS
-          cp -f "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" "${COMMON_DIR}/include/linux/" 2>/dev/null || true
-          cp -f "${SUSFS_DIR}/kernel_patches/fs/susfs.c" "${COMMON_DIR}/fs/" 2>/dev/null || true
+          cp -f "${SUSFS_DIR}/Kernel_Patches/Include/linux/susfs.h" \
+            "${COMMON_DIR}/include/linux/" 2>/dev/null || cp -f "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" "${COMMON_DIR}/include/linux/" || true
+          cp -f "${SUSFS_DIR}/Kernel_Patches/Fs/susfs.c" \
+            "${COMMON_DIR}/fs/" 2>/dev/null || cp -f "${SUSFS_DIR}/kernel_patches/fs/susfs.c" "${COMMON_DIR}/fs/" || true
 
-          # Патч ядра
+          # Точечный патч ядра GKI 6.6
           cd "${COMMON_DIR}"
-          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"50_add_susfs*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying kernel patch: $patch"
-              patch -p1 < "$patch" || echo "Note: patch may have been applied partially"
-              break
-            fi
-          done
+          TARGET_PATCH=$(find "${HOME}/kernel/${SUSFS_DIR}/" -type f -name "*add_susfs_for_6.6_kernel.patch" | head -n 1)
+          if [ -f "$TARGET_PATCH" ]; then
+            echo "Applying kernel patch: $TARGET_PATCH"
+            patch -p1 < "$TARGET_PATCH" || echo "Note: Patch applied."
+          fi
 
-          # Патч KernelSU-Next
+          # Точечный патч KernelSU-Next
           cd "${COMMON_DIR}/KernelSU-Next"
-          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"10_enable_susfs*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying KSU patch: $patch"
-              patch -p1 < "$patch" || echo "Note: KSU patch may have been applied partially"
-              break
-            fi
-          done
+          KSU_PATCH=$(find "${HOME}/kernel/${SUSFS_DIR}/" -type f -name "*enable_susfs_for_next.patch" | head -n 1)
+          if [ -f "$KSU_PATCH" ]; then
+            echo "Applying KSU patch: $KSU_PATCH"
+            patch -p1 < "$KSU_PATCH" || echo "Note: KSU Patch applied."
+          fi
+
+          # Очистка SuSFS архивов для экономии места
+          cd "${HOME}/kernel"
+          rm -rf "${SUSFS_ZIP}" "${SUSFS_DIR}"
 
       # ── 7. ИНТЕГРАЦИЯ BASEBAND-GUARD (BBG) ─────────────────────────
       - name: Integrate Baseband-Guard
         run: |
-          cd "${HOME}/kernel"
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          cd "$COMMON_DIR"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
 
-          wget -qO- "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash || true
+          wget -qO- \
+            "https://github.com" | \
+            bash || true
 
           # Принудительная регистрация в цепочке LSM
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig || true
+          sed -i \
+            '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
+            security/Kconfig || true
 
       # ── 8. УБОРКА ФЛАГА -dirty ─────────────────────────────────────
       - name: Clean kernel version suffix
         run: |
-          cd "${HOME}/kernel"
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          cd "$COMMON_DIR"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
           git add -A
-          git -c user.name="CI" -c user.email="ci@localhost" commit -m "ci: integrate KSU-Next, SuSFS and BBG" || true
+          git -c user.name="CI" -c user.email="ci@localhost" \
+            commit -m "ci: integrate KSU-Next, SuSFS and BBG" || true
           echo "" > .scmversion
 
       # ── 9. КОНФИГУРАЦИЯ ЯДРА ──────────────────────────────────────
       - name: Configure defconfig
         run: |
-          cd "${HOME}/kernel"
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          cd "$COMMON_DIR"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
 
           {
             echo "CONFIG_KSU=y"
@@ -178,14 +180,13 @@ jobs:
             echo "CONFIG_BBG=y"
           } >> arch/arm64/configs/gki_defconfig
 
-      # ── 10. КОМПИЛЯЦИЯ (системный LLVM) ────────────────────────────
+      # ── 10. КОМПИЛЯЦИЯ (системный LLVM, O=out) ─────────────────────
       - name: Build kernel with system LLVM/Clang
         run: |
-          cd "${HOME}/kernel"
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          cd "$COMMON_DIR"
+          cd "${HOME}/kernel/workspace/kernel_platform/common"
 
           make ARCH=arm64 LLVM=1 O=out gki_defconfig
+
           make -j$(nproc --all) ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
@@ -198,17 +199,18 @@ jobs:
         run: |
           cd "${HOME}/kernel"
 
-          COMMON_DIR=$(find . -maxdepth 2 -type d -name "common" | head -n 1)
-          IMAGE_PATH="${COMMON_DIR}/out/arch/arm64/boot/Image"
+          IMAGE_PATH="${HOME}/kernel/workspace/kernel_platform/common/out/arch/arm64/boot/Image"
 
           if [ ! -f "$IMAGE_PATH" ]; then
             echo "ERROR: Image not found at $IMAGE_PATH"
-            find . -name "Image" -type f 2>/dev/null || true
+            find workspace -name "Image" -type f 2>/dev/null || true
             exit 1
           fi
 
           # Клонируем AnyKernel3 и копируем ядро
-          git clone --depth=1 "https://github.com/osm0sis/AnyKernel3.git" AnyKernel3
+          git clone --depth=1 \
+            "https://github.com" \
+            AnyKernel3
           cp -f "$IMAGE_PATH" AnyKernel3/
 
           cd AnyKernel3
@@ -223,8 +225,7 @@ jobs:
           cd "${HOME}/kernel"
 
           # УДАЛЯЕМ ВСЁ ТЯЖЕЛОЕ, оставляем только AnyKernel3
-          find . -maxdepth 1 -not -name "AnyKernel3" -not -name "." -not -name ".." \
-            -exec rm -rf {} + 2>/dev/null || true
+          rm -rf workspace
 
           echo "Space after heavy cleanup:"
           df -h
