@@ -25,14 +25,12 @@ jobs:
       - name: Set Git Identity
         run: |
           git config --global user.name "${{ github.actor }}"
-          git config --global user.email "${{ github.actor }}@://github.com"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
 
       - name: Sync Official OnePlus Source Code
         run: |
           mkdir workspace && cd workspace
-          # Собираем ссылку текстом, чтобы обойти фильтр
-          GH_HOST="github.com"
-          repo init -u "https://$GH_HOST/OnePlusOSS/kernel_manifest.git" -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
+          repo init -u "https://github.com" -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
           
           rm -f kernel_platform/common/android/abi_gki_protected_exports_* || true
@@ -44,14 +42,15 @@ jobs:
       - name: Inject Latest KernelSU Next (Dev branch)
         run: |
           cd workspace/kernel_platform/common
-          GH_HOST="github.com"
-          curl -LSs "https://raw.$GH_HOST/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev
+          curl -LSs "https://githubusercontent.com" | bash -s dev
 
       - name: Inject Latest SuSFS v2.2.0+ (gki-6.6 branch)
         run: |
           cd workspace
-          GH_HOST="github.com"
-          git clone "https://$GH_HOST/simonpunk/susfs4ksu.git" -b gki-6.6 susfs_source
+          # Скачиваем стабильным zip-архивом ветку gki-6.6, чтобы полностью избежать проблем с git clone
+          wget https://github.com -O susfs.zip
+          unzip -q susfs.zip
+          mv susfs4ksu-gki-6.6 susfs_source
           
           echo "============================================="
           echo "🔥 АКТУАЛЬНАЯ ВЕРСИЯ СКАЧАННОГО SUSFS В СБОРКЕ:"
@@ -76,9 +75,10 @@ jobs:
       - name: Pack Stable AnyKernel3 Archive
         run: |
           cd workspace
-          GH_HOST="github.com"
-          git clone "https://$GH_HOST/OSM0SIS/AnyKernel3.git" --depth=1
-          rm -rf AnyKernel3/.git AnyKernel3/README.md
+          # Скачиваем AnyKernel3 архивом без использования уязвимого git clone
+          wget https://github.com -O ak3.zip
+          unzip -q ak3.zip
+          mv AnyKernel3-master AnyKernel3
           
           cp kernel_platform/common/out/arch/arm64/boot/Image ./AnyKernel3/Image 2>/dev/null || cp kernel_platform/common/arch/arm64/boot/Image ./AnyKernel3/Image
           
