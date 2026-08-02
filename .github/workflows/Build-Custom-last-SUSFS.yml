@@ -1,5 +1,4 @@
 name: build Custom Last SUSFS
-
 on:
     workflow_dispatch:
       inputs:
@@ -103,11 +102,13 @@ jobs:
       - name: Set git config
         run: |
           git config --global user.name ${{ github.actor }}
-          git config --global user.email ${{ github.actor }}@://github.com
+          git config --global user.email ${{ github.actor }}@users.noreply.github.com
 
       - name: Install repo tool
         run: |
-          sudo apt-get update && sudo apt-get install -y repo
+          curl -sSL https://googleapis.com > ~/repo
+          chmod a+x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
 
       - name: sync
         run: |
@@ -122,12 +123,11 @@ jobs:
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/common/scripts/setlocalversion
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/msm-kernel/scripts/setlocalversion
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' kernel_platform/external/dtc/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/common/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/msm-kernel/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/external/dtc/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/common/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/msm-kernel/scripts/setlocalversion
-          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/external/dtc/scripts/setlocalversion
+          
+          # Оставляем оригинальные строчки автора для правильной подмены ogki меток:
+          sed -i "s/echo \"\$res\"/echo \"-ogki-${{github.actor}}\"/g" kernel_platform/common/scripts/setlocalversion
+          sed -i "s/echo \"\$res\"/echo \"-ogki-${{github.actor}}\"/g" kernel_platform/msm-kernel/scripts/setlocalversion
+          sed -i "s/echo \"\$res\"/echo \"-ogki-${{github.actor}}\"/g" kernel_platform/external/dtc/scripts/setlocalversion
 
       - name: Get scripts
         uses: actions/checkout@v7
@@ -171,17 +171,17 @@ jobs:
             ARGS+=" --no-ver-edit"
           fi
 
-          # Принудительное скачивание патчей SuSFS v2.2.0+ в обход бинарника
+          # Принудительно выкачиваем патчи SuSFS v2.2.0+ из официального репозитория
           rm -rf kernel_workspace/susfs4ksu 2>/dev/null || true
           git clone https://github.com -b gki-6.6 kernel_workspace/susfs4ksu
 
-          # Вывод версии SuSFS крупно прямо в лог воркфлоу
+          # Крупно пишем реальную скачанную версию SuSFS прямо в логи воркфлоу GitHub
           echo "============================================="
           echo "🔥 ПРОВЕРКА СКАЧАННОЙ ВЕРСИИ SUSFS:"
           grep -ioh "v[0-9]\.[0-9]\.[0-9]" kernel_workspace/susfs4ksu/Kernel_Patches/Update_Logs.txt 2>/dev/null | head -n 1 || echo "Версия: gki-6.6 (Latest)"
           echo "============================================="
 
-          # Замена старых патчей 1.5.2 на новые версии 2.2.0+
+          # Затираем старые патчи 1.5.2 в папке скриптов новыми файлами 2.2.0+
           cp -rf kernel_workspace/susfs4ksu/Kernel_Patches/* ./scripts/patches/ 2>/dev/null || true
 
           cd kernel_workspace
