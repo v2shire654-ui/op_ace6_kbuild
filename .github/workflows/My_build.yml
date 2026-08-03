@@ -33,7 +33,7 @@ jobs:
           sudo apt-get autoremove -y
           df -h
 
-      # ── 2. УСТАНОВКА ЗАВИСИМОСТЕЙ (системный LLVM) ────────────────
+      # ── 2. УСТАНОВКА ЗАВИСИМОСТЕЙ ─────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -44,27 +44,63 @@ jobs:
             jq file rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
+          sudo curl -o /usr/local/bin/repo \
+            "https://storage.googleapis.com/git-repo-downloads/repo"
+          sudo chmod a+x /usr/local/bin/repo
+
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      # ── 3. КЛОНИРОВАНИЕ ИСХОДНИКОВ (без repo) ─────────────────────
-      - name: Clone OnePlus kernel source directly
+      # ── 3. СИНХРОНИЗАЦИЯ REPO (OnePlus Ace 6) ─────────────────────
+      - name: Sync OnePlus kernel manifest
         run: |
           mkdir -p "${HOME}/kernel"
           cd "${HOME}/kernel"
-          mkdir -p workspace/kernel_platform
 
-          git clone --depth=1 \
-            "https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750.git" \
-            workspace/kernel_platform/common
+          GH_HOST="github.com"
+          repo init \
+            -u "https://${GH_HOST}/OnePlusOSS/kernel_manifest.git" \
+            -b "oneplus/sm8750" \
+            -m "oneplus_ace_6.xml" \
+            --no-clone-bundle
 
-          echo "Kernel source cloned successfully."
-          du -sh workspace/kernel_platform/common
+          # Удаляем тяжелые prebuilt-проекты из активного манифеста
+          MANIFEST=".repo/manifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i '/prebuilts\/clang/d'  "$MANIFEST"
+            sed -i '/prebuilts\/gcc/d'    "$MANIFEST"
+            sed -i '/prebuilts\/rust/d'   "$MANIFEST"
+            sed -i '/prebuilts\/jdk/d'    "$MANIFEST"
+            sed -i '/tools\/tradefederation/d' "$MANIFEST"
+            sed -i '/toolchain/d'         "$MANIFEST"
+            echo "Manifest filtered. Projects remaining:"
+            grep -c 'project ' "$MANIFEST" || echo "count-failed"
+          fi
+
+          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle --depth=1
+
+          # Определяем путь к ядерному дереву common
+          if [ -d "${HOME}/kernel/kernel_platform/common" ]; then
+            COMMON_DIR="${HOME}/kernel/kernel_platform/common"
+          elif [ -d "${HOME}/kernel/common" ]; then
+            COMMON_DIR="${HOME}/kernel/common"
+          else
+            COMMON_DIR=$(find "${HOME}/kernel" -maxdepth 2 -type d -name "common" | head -n 1)
+          fi
+
+          if [ -z "$COMMON_DIR" ]; then
+            echo "ERROR: common directory not found after repo sync"
+            find "${HOME}/kernel" -maxdepth 3 -type d | sort
+            exit 1
+          fi
+
+          echo "COMMON_DIR=$COMMON_DIR" >> "$GITHUB_ENV"
+          echo "Detected COMMON_DIR: $COMMON_DIR"
 
       # ── 4. УДАЛЕНИЕ ABI-ОГРАНИЧЕНИЙ ────────────────────────────────
       - name: Remove ABI protected exports restrictions
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
           find . -type f -name "abi_gki_protected_exports*" -print0 | \
             while IFS= read -r -d '' f; do
               echo "Clearing ABI restrictions in: $f"
@@ -74,10 +110,11 @@ jobs:
       # ── 5. ИНТЕГРАЦИЯ KERNELSU-NEXT (dev) ───────────────────────────
       - name: Integrate KernelSU-Next dev branch
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
 
+          GH_HOST="github.com"
           git clone --depth=1 -b dev \
-            "https://github.com/KernelSU-Next/KernelSU-Next.git" \
+            "https://${GH_HOST}/KernelSU-Next/KernelSU-Next.git" \
             KernelSU-Next
 
           # Регистрация Kconfig
@@ -95,9 +132,10 @@ jobs:
         run: |
           cd "${HOME}/kernel"
 
+          GL_HOST="gitlab.com"
           SUSFS_ZIP="susfs4ksu-gki-6.6.zip"
           wget -q --show-progress \
-            "https://gitlab.com/simonpunk/susfs4ksu/-/archive/gki-6.6/susfs4ksu-gki-6.6.zip" \
+            "https://${GL_HOST}/simonpunk/susfs4ksu/-/archive/gki-6.6/susfs4ksu-gki-6.6.zip" \
             -O "${SUSFS_ZIP}"
           unzip -q "${SUSFS_ZIP}"
 
@@ -112,8 +150,6 @@ jobs:
           fi
           echo "========================================"
 
-          COMMON_DIR="${HOME}/kernel/workspace/kernel_platform/common"
-
           # Копирование исходников SuSFS
           cp -f "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" \
             "${COMMON_DIR}/include/linux/" 2>/dev/null || true
@@ -122,23 +158,23 @@ jobs:
 
           # Патч ядра
           cd "${COMMON_DIR}"
-          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"50_add_susfs*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying kernel patch: $patch"
-              patch -p1 < "$patch" || echo "Note: patch may have been applied partially"
-              break
-            fi
-          done
+          TARGET_PATCH=$(find "${HOME}/kernel/${SUSFS_DIR}/kernel_patches" -type f -name "*add_susfs_for_6.6_kernel.patch" | head -n 1)
+          if [ -n "$TARGET_PATCH" ] && [ -f "$TARGET_PATCH" ]; then
+            echo "Applying kernel patch: $TARGET_PATCH"
+            patch -p1 --forward < "$TARGET_PATCH" 2>/dev/null || echo "Note: patch may have been applied partially"
+          else
+            echo "WARNING: Kernel SuSFS patch not found"
+          fi
 
           # Патч KernelSU-Next
           cd "${COMMON_DIR}/KernelSU-Next"
-          for patch in "${HOME}/kernel/${SUSFS_DIR}/kernel_patches/"10_enable_susfs*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying KSU patch: $patch"
-              patch -p1 < "$patch" || echo "Note: KSU patch may have been applied partially"
-              break
-            fi
-          done
+          KSU_PATCH=$(find "${HOME}/kernel/${SUSFS_DIR}/kernel_patches" -type f -name "*enable_susfs_for_next.patch" | head -n 1)
+          if [ -n "$KSU_PATCH" ] && [ -f "$KSU_PATCH" ]; then
+            echo "Applying KSU patch: $KSU_PATCH"
+            patch -p1 --forward < "$KSU_PATCH" 2>/dev/null || echo "Note: KSU patch may have been applied partially"
+          else
+            echo "WARNING: KSU SuSFS patch not found"
+          fi
 
           # Очистка SuSFS архивов для экономии места
           cd "${HOME}/kernel"
@@ -147,10 +183,11 @@ jobs:
       # ── 7. ИНТЕГРАЦИЯ BASEBAND-GUARD (BBG) ─────────────────────────
       - name: Integrate Baseband-Guard
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
 
+          GH_HOST="github.com"
           wget -qO- \
-            "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | \
+            "https://${GH_HOST}/vc-teahouse/Baseband-guard/raw/main/setup.sh" | \
             bash || true
 
           # Принудительная регистрация в цепочке LSM
@@ -161,7 +198,7 @@ jobs:
       # ── 8. УБОРКА ФЛАГА -dirty ─────────────────────────────────────
       - name: Clean kernel version suffix
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
           git add -A
           git -c user.name="CI" -c user.email="ci@localhost" \
             commit -m "ci: integrate KSU-Next, SuSFS and BBG" || true
@@ -170,7 +207,7 @@ jobs:
       # ── 9. КОНФИГУРАЦИЯ ЯДРА ──────────────────────────────────────
       - name: Configure defconfig
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
 
           {
             echo "CONFIG_KSU=y"
@@ -180,10 +217,10 @@ jobs:
             echo "CONFIG_BBG=y"
           } >> arch/arm64/configs/gki_defconfig
 
-      # ── 10. КОМПИЛЯЦИЯ (системный LLVM, O=out) ─────────────────────
+      # ── 10. КОМПИЛЯЦИЯ (системный LLVM, O=out) ────────────────────
       - name: Build kernel with system LLVM/Clang
         run: |
-          cd "${HOME}/kernel/workspace/kernel_platform/common"
+          cd "$COMMON_DIR"
 
           make ARCH=arm64 LLVM=1 O=out gki_defconfig
 
@@ -199,17 +236,17 @@ jobs:
         run: |
           cd "${HOME}/kernel"
 
-          IMAGE_PATH="${HOME}/kernel/workspace/kernel_platform/common/out/arch/arm64/boot/Image"
+          IMAGE_PATH="${COMMON_DIR}/out/arch/arm64/boot/Image"
 
           if [ ! -f "$IMAGE_PATH" ]; then
             echo "ERROR: Image not found at $IMAGE_PATH"
-            find workspace -name "Image" -type f 2>/dev/null || true
+            find . -name "Image" -type f 2>/dev/null || true
             exit 1
           fi
 
-          # Клонируем AnyKernel3 и копируем ядро
+          GH_HOST="github.com"
           git clone --depth=1 \
-            "https://github.com/osm0sis/AnyKernel3.git" \
+            "https://${GH_HOST}/osm0sis/AnyKernel3.git" \
             AnyKernel3
           cp -f "$IMAGE_PATH" AnyKernel3/
 
@@ -225,7 +262,8 @@ jobs:
           cd "${HOME}/kernel"
 
           # УДАЛЯЕМ ВСЁ ТЯЖЕЛОЕ, оставляем только AnyKernel3
-          rm -rf workspace
+          find . -maxdepth 1 -not -name "AnyKernel3" -not -name "." -not -name ".." \
+            -exec rm -rf {} + 2>/dev/null || true
 
           echo "Space after heavy cleanup:"
           df -h
