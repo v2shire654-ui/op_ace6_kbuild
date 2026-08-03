@@ -1,0 +1,257 @@
+name: build Custom
+
+on:
+    workflow_dispatch:
+      inputs:
+        KSU:
+          required: true
+          type: choice
+          description: "选择KSU变体"
+          default: "RKSU"
+          options:
+            - 'KSU'
+            - 'NEXT'
+            - 'RKSU'
+            - 'SUKISU'
+            - 'RESUKISU'
+            - 'MAMBOSU'
+            - 'XXKSU'
+        KSU_BRANCH:
+          required: true
+          type: string
+          description: "KSU分支"
+          default: "default"
+        UPLOAD_TO_GH:
+          required: true
+          type: boolean
+          description: "上传至 Github Action(如果你跑得多的话就关掉，走TG上传)"
+          default: true
+        BBG:
+          type: boolean
+          description: "启用 BBG"
+          default: false
+        SUSFS:
+          type: boolean
+          description: "启用 SuSFS (最新版，自动拉取)"
+          default: false
+        KPM:
+          type: boolean
+          description: "启用 KPM (白名单限制启用)"
+          default: false
+        multi_manager:
+          type: boolean
+          description: "禁用 多管理器支持 (仅ReSukiSU)"
+          default: false
+        mountify:
+          type: boolean
+          description: "启用 Mountify 模块支持"
+          default: false
+        ZRAM:
+          type: choice
+          description: "使用 ZRAM 补丁"
+          default: "DISABLE"
+          options:
+            - 'DISABLE'
+            - 'LZ4'
+            - 'LZ4KD'
+        fengchi:
+          type: boolean
+          description: "应用风驰补丁"
+          default: false
+        droidspace:
+          type: boolean
+          description: "Droidspace-OSS 支持"
+          default: false
+        ntsync:
+          type: boolean
+          description: "NTSync 支持"
+          default: false
+        edit_kernel_ver:
+          type: boolean
+          description: "不编辑内核版本"
+          default: false
+
+jobs:
+  Build-Kernel:
+    name: "Build kernel with ${{ github.event.inputs.KSU }}"
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      CCACHE_DIR: /home/runner/.ccache  
+      CCACHE_MAXSIZE: 8G
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ runner.os }}-${{ github.event.inputs.KSU }}-${{ github.ref }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.event.inputs.KSU }}-
+
+      - name: Set git config
+        run: |
+          git config --global user.name ${{ github.actor }}
+          git config --global user.email ${{ github.actor }}@users.noreply.github.com
+
+      - name: Install repo tool
+        run: |
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          chmod a+x ~/repo
+          sudo mv ~/repo /usr/local/bin/repo
+
+      - name: sync
+        run: |
+          mkdir kernel_workspace && cd kernel_workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          sed -i 's/ -dirty//g' kernel_platform/common/scripts/setlocalversion
+          sed -i 's/ -dirty//g' kernel_platform/msm-kernel/scripts/setlocalversion
+          sed -i 's/ -dirty//g' kernel_platform/external/dtc/scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '''s/-dirty//g''')' kernel_platform/common/scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '''s/-dirty//g''')' kernel_platform/msm-kernel/scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '''s/-dirty//g''')' kernel_platform/external/dtc/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/common/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/msm-kernel/scripts/setlocalversion
+          sed -i '$s|echo "\$res"|echo "-ogki-${{github.actor}}"|' kernel_platform/external/dtc/scripts/setlocalversion
+
+      - name: Get scripts
+        uses: actions/checkout@v7
+        with: 
+          path: scripts
+
+      - name: Run configure
+        run: |
+          cp ./scripts/scripts/configure ./kernel_workspace/
+          chmod +x ./kernel_workspace/configure
+
+          ARGS="--ksu-variant ${{ github.event.inputs.KSU }} --ksu-branch ${{ github.event.inputs.KSU_BRANCH }}"
+          # УБРАНО: --susfs теперь применяется вручную в отдельном шаге
+          if [ "${{ github.event.inputs.BBG }}" == "true" ]; then
+            ARGS+=" --with-bbg"
+          fi
+          if [ "${{ github.event.inputs.KPM }}" == "true" ] && [ "${{ github.event.inputs.KSU }}" == "SUKISU" ]; then
+            ARGS+=" --kpm"
+          fi
+          if [ "${{ github.event.inputs.mountify }}" == "true" ]; then
+            ARGS+=" --mountify"
+          fi
+          if [ "${{ github.event.inputs.ZRAM }}" != "DISABLE" ]; then
+            ARGS+=" --zram ${{ github.event.inputs.ZRAM }}"
+          fi
+          if [ "${{ github.event.inputs.fengchi }}" == "true" ]; then
+            ARGS+=" --fengchi"
+          fi
+          if [ "${{ github.event.inputs.multi_manager }}" == "true" ] || [ ! "${{ github.event.inputs.KSU }}" == "RESUKISU" ]; then
+            ARGS+=" --multi-manager"
+          fi
+          if [ "${{ github.event.inputs.droidspace }}" == "true" ]; then
+            ARGS+=" --droidspace"
+          fi
+          if [ "${{ github.event.inputs.ntsync }}" == "true" ]; then
+            ARGS+=" --ntsync"
+          fi
+          if [ "${{ github.event.inputs.edit_kernel_ver }}" == "true" ]; then
+            ARGS+=" --no-ver-edit"
+          fi
+
+          cd kernel_workspace
+          ./configure $ARGS
+
+      # ===================================================================
+      # НОВЫЙ ШАГ: Интеграция SuSFS последней версии (независимо от configure)
+      # ===================================================================
+      - name: Integrate SuSFS (latest from gitlab)
+        if: github.event.inputs.SUSFS == 'true'
+        run: |
+          echo "[+] Cloning latest SuSFS for gki-android15-6.6..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6 --depth=1 /tmp/susfs4ksu
+
+          cd kernel_workspace/kernel_platform/common
+
+          echo "[+] Copying SuSFS kernel files..."
+          cp -v /tmp/susfs4ksu/kernel_patches/fs/* ./fs/
+          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+
+          echo "[+] Applying main kernel patch..."
+          cp /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-gki-android15-6.6.patch ./
+          patch -p1 < 50_add_susfs_in_kernel-gki-android15-6.6.patch ||             (echo "[!] Trying generic patch name..." &&              cp /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-*.patch ./susfs_kernel.patch &&              patch -p1 < susfs_kernel.patch)
+
+          echo "[+] Applying KernelSU patch..."
+          cp /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+          cd KernelSU
+          patch -p1 < 10_enable_susfs_for_ksu.patch
+
+          echo "[+] Enabling SuSFS in kernel config..."
+          cd ../arch/arm64/configs
+          # Добавляем опции SuSFS в gki_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> gki_defconfig
+
+          echo "[+] SuSFS integration complete!"
+
+      - name: build
+        run: |
+          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/clang-r510928/bin:$PATH" 
+          export PATH="/usr/lib/ccache:$PATH"
+          sudo apt install libelf-dev ccache
+          cd kernel_workspace/kernel_platform/common
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-O2  gki_defconfig all
+
+      - name: Pack anykernel3
+        run: |
+         cd kernel_workspace/
+         git clone https://github.com/luyancib-org/Anykernel3 --depth=1
+         rm -rf Anykernel3/.git
+         cp kernel_platform/common/out/arch/arm64/boot/Image ./Anykernel3/Image
+         cd Anykernel3
+         zip -q -r "../AnyKernel3_Op_ACE6.zip" ./*
+
+      - name: Upload
+        if: inputs.UPLOAD_TO_GH
+        uses: actions/upload-artifact@v7
+        with:
+          name: Anykernel3
+          path: kernel_workspace/AnyKernel3_Op_ACE6.zip
+          archive: false
+
+      - name: Upload to telegram
+        run: |
+          if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
+            pip3 install telethon
+            python3 ./scripts/scripts/buildbot.py "./kernel_workspace/AnyKernel3_Op_ACE6.zip"
+          fi
+        env:
+          CHATID: ${{secrets.CHATID}}
+          BOT_TOKEN: ${{secrets.BOT_TOKEN}}
+          MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
+          KSUVAR: ${{ github.event.inputs.KSU }}
+          SUSFS: ${{ github.event.inputs.SUSFS }}
+          BBG: ${{ github.event.inputs.BBG }}
+          mountify: ${{ github.event.inputs.mountify }}
+          zram: ${{ github.event.inputs.ZRAM }}
+          Fengchi: ${{ github.event.inputs.fengchi }}
