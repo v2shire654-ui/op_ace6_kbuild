@@ -1,4 +1,4 @@
-name: build Custom
+name: build Custom fixed
 
 on:
     workflow_dispatch:
