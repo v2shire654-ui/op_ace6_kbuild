@@ -44,6 +44,8 @@ jobs:
             jq file rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
+          # Удаляем старую системную версию repo и ставим свежую от Google
+          sudo rm -f /usr/bin/repo /usr/local/bin/repo
           sudo curl -o /usr/local/bin/repo \
             "https://storage.googleapis.com/git-repo-downloads/repo"
           sudo chmod a+x /usr/local/bin/repo
@@ -62,22 +64,32 @@ jobs:
             -u "https://${GH_HOST}/OnePlusOSS/kernel_manifest.git" \
             -b "oneplus/sm8750" \
             -m "oneplus_ace_6.xml" \
-            --no-clone-bundle
+            --depth=1 --no-clone-bundle
 
-          # Удаляем тяжелые prebuilt-проекты из активного манифеста
-          MANIFEST=".repo/manifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            sed -i '/prebuilts\/clang/d'  "$MANIFEST"
-            sed -i '/prebuilts\/gcc/d'    "$MANIFEST"
-            sed -i '/prebuilts\/rust/d'   "$MANIFEST"
-            sed -i '/prebuilts\/jdk/d'    "$MANIFEST"
-            sed -i '/tools\/tradefederation/d' "$MANIFEST"
-            sed -i '/toolchain/d'         "$MANIFEST"
-            echo "Manifest filtered. Projects remaining:"
-            grep -c 'project ' "$MANIFEST" || echo "count-failed"
+          # Фильтруем prebuilt-проекты из ВСЕХ xml файлов манифеста
+          MANIFEST_DIR=".repo/manifests"
+          if [ -d "$MANIFEST_DIR" ]; then
+            find "$MANIFEST_DIR" -name "*.xml" -print0 | \
+              while IFS= read -r -d '' f; do
+                sed -i '/path="prebuilts\/clang"/d'  "$f"
+                sed -i '/path="prebuilts\/gcc"/d'    "$f"
+                sed -i '/path="prebuilts\/rust"/d'   "$f"
+                sed -i '/path="prebuilts\/jdk"/d'    "$f"
+                sed -i '/path="tools\/tradefederation"/d' "$f"
+                sed -i '/path="toolchain"/d'         "$f"
+              done
+
+            # Проверяем валидность основного манифеста
+            MAIN_MANIFEST="${MANIFEST_DIR}/oneplus_ace_6.xml"
+            if [ -f "$MAIN_MANIFEST" ] && grep -q "<manifest>" "$MAIN_MANIFEST"; then
+              echo "Manifest filtered successfully."
+            else
+              echo "WARNING: Manifest filtering may have caused issues. Restoring..."
+              cd "$MANIFEST_DIR" && git checkout -- . && cd "${HOME}/kernel"
+            fi
           fi
 
-          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle --depth=1
+          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle
 
           # Определяем путь к ядерному дереву common
           if [ -d "${HOME}/kernel/kernel_platform/common" ]; then
@@ -88,7 +100,7 @@ jobs:
             COMMON_DIR=$(find "${HOME}/kernel" -maxdepth 2 -type d -name "common" | head -n 1)
           fi
 
-          if [ -z "$COMMON_DIR" ]; then
+          if [ -z "$COMMON_DIR" ] || [ ! -d "$COMMON_DIR" ]; then
             echo "ERROR: common directory not found after repo sync"
             find "${HOME}/kernel" -maxdepth 3 -type d | sort
             exit 1
@@ -163,7 +175,7 @@ jobs:
             echo "Applying kernel patch: $TARGET_PATCH"
             patch -p1 --forward < "$TARGET_PATCH" 2>/dev/null || echo "Note: patch may have been applied partially"
           else
-            echo "WARNING: Kernel SuSFS patch not found"
+            echo "WARNING: Kernel SuSFS patch not found, skipping"
           fi
 
           # Патч KernelSU-Next
@@ -173,7 +185,7 @@ jobs:
             echo "Applying KSU patch: $KSU_PATCH"
             patch -p1 --forward < "$KSU_PATCH" 2>/dev/null || echo "Note: KSU patch may have been applied partially"
           else
-            echo "WARNING: KSU SuSFS patch not found"
+            echo "WARNING: KSU SuSFS patch not found, skipping"
           fi
 
           # Очистка SuSFS архивов для экономии места
@@ -262,6 +274,7 @@ jobs:
           cd "${HOME}/kernel"
 
           # УДАЛЯЕМ ВСЁ ТЯЖЕЛОЕ, оставляем только AnyKernel3
+          rm -rf .repo kernel_platform common
           find . -maxdepth 1 -not -name "AnyKernel3" -not -name "." -not -name ".." \
             -exec rm -rf {} + 2>/dev/null || true
 
