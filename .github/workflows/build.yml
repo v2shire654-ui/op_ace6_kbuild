@@ -2,6 +2,15 @@ name: build normal
 
 on:
     workflow_dispatch:
+        inputs:
+            kernel_version:
+                required: true
+                type: choice
+                description: "选择内核版本"
+                default: "latest"
+                options:
+                    - 'latest'
+                    - '6.6.89'
     push:
         branches:
             - main
@@ -49,9 +58,12 @@ jobs:
           sudo mv ~/repo /usr/local/bin/repo
 
       - name: sync
+        env:
+          kernel_version: ${{ github.event.inputs.kernel_version }}
         run: |
+          formatted_kernel_version=$(echo "$kernel_version" | sed 's/\./_/g')
           mkdir kernel_workspace && cd kernel_workspace
-          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8750 -m oneplus_ace_6.xml --depth=1
+          repo init -u https://github.com/luyanci/op_ace6_manifest.git -b oneplus/sm8750 -m oneplus_ace_6_$formatted_kernel_version.xml --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
